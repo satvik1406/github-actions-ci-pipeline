@@ -1,0 +1,94 @@
+name: Build and deploy the image for any environment 
+
+on:
+  workflow_call:
+   inputs:
+    env_name:
+     type: string
+     required: true
+   secrets:
+    AWS_ACCESS_KEY_ID:
+     required: true
+    AWS_SECRET_ACCESS_KEY:
+     required: true
+    API_TOKEN_GITHUB:
+     required: true
+jobs:
+  build-and-push:
+    name: Build and Push to ECR
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.env_name }}
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+      with:
+        path: github-actions-test
+        
+    - name: Checkout deployment-config repo
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0 # otherwise, there would be errors pushing refs to the destination repository.
+        repository: satvik-eltropy/deployment-config
+        ref: main
+        path: deployment-config
+        token: ${{ secrets.API_TOKEN_GITHUB }}
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-west-2
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Download latest earthly
+      run: "sudo /bin/sh -c 'wget https://github.com/earthly/earthly/releases/download/v0.6.19/earthly-linux-amd64 -O /usr/local/bin/earthly && chmod +x /usr/local/bin/earthly'"
+
+    - name: Earthly build docker image
+      run: |
+        cd github-actions-test
+        earthly +docker
+    - name: Automatic Tagging of Releases
+      id: increment-git-tag
+      run: |
+        cd github-actions-test
+        bash ./build/git_update.sh -v patch
+    
+    - name: Tag, and Push the Image to Amazon ECR
+      id: build-image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: application-build-docker-images
+        IMAGE_TAG: ${{ steps.increment-git-tag.outputs.git-tag }}
+      run: |
+        docker tag go-example:latest $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+    
+    - name: Patch the deployment.yaml files
+      run: |
+         kubectl patch --local -f deployment-config/go-app1/go-app1-blue-deploy.yaml -p '{"spec":{"template":{"spec":{"containers":[{"name":"go-app","image":"${{ steps.login-ecr.outputs.registry }}/application-build-docker-images:${{ steps.increment-git-tag.outputs.git-tag }}"}]}}}}' -o yaml > go-app1-blue-deploy.yaml
+         kubectl patch --local -f go-app1-blue-deploy.yaml -p '{"spec":{"template":{"metadata":{"labels":{"version":"${{ steps.increment-git-tag.outputs.git-tag }}"}}}}}' -o yaml > deployment-config/go-app1/go-app1-blue-deploy.yaml
+         kubectl patch --local -f deployment-config/go-app2/go-app2-blue-deploy.yaml -p '{"spec":{"template":{"spec":{"containers":[{"name":"go-app","image":"${{ steps.login-ecr.outputs.registry }}/application-build-docker-images:${{ steps.increment-git-tag.outputs.git-tag }}"}]}}}}' -o yaml > go-app2-blue-deploy.yaml
+         kubectl patch --local -f go-app2-blue-deploy.yaml -p '{"spec":{"template":{"metadata":{"labels":{"version":"${{ steps.increment-git-tag.outputs.git-tag }}"}}}}}' -o yaml > deployment-config/go-app2/go-app2-blue-deploy.yaml
+    - name: Update Destination rule and rollout specs
+      uses: mikefarah/yq@master
+      with:
+        cmd: |
+          yq -i '.spec.subsets[1].labels.version = "${{ steps.increment-git-tag.outputs.git-tag }}"' 'deployment-config/go-app2/go-app2-destination.yaml'
+          yq -i '.spec.template.metadata.labels.version = "${{ steps.increment-git-tag.outputs.git-tag }}" | .spec.template.spec.containers[0].image = "${{ steps.login-ecr.outputs.registry }}/application-build-docker-images:${{ steps.increment-git-tag.outputs.git-tag }}"' 'deployment-config/go-app3/go-app3-rollout.yaml'
+
+    - name: Commit changes to deployment-config repo
+      env:
+        GITHUB_EMAIL: satvik@eltropy.com
+        GITHUB_NAME: satvik-eltropy
+      run: |
+        cd deployment-config
+        git log -1
+        git status
+        git config user.email ${GITHUB_EMAIL}
+        git config user.name ${GITHUB_NAME}
+        git commit -am "Updated the ecr image link in deployment files"
+        git push
