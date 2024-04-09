@@ -1,0 +1,42 @@
+name: A workflow to deploy in multiple environments
+
+on:
+  workflow_dispatch:
+    inputs:
+      releaseType:
+        type: choice
+        required: true
+        description: Choose the environment to deploy
+        options:
+        - Dev
+        - Production
+
+jobs:
+  check-tests:
+   uses: satvik-eltropy/github-actions-test/.github/workflows/unit_test.yml@main
+
+  prod:
+   needs: [ check-tests ]
+   if: github.event.inputs.releaseType == 'Prod'
+   uses: satvik-eltropy/github-actions-test/.github/workflows/build&deploy.yml@main
+   with:
+      env_name: Production
+   secrets:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        API_TOKEN_GITHUB: ${{ secrets.API_TOKEN_GITHUB }}
+  
+  dev:
+   needs: [ check-tests ]
+   if: github.event.inputs.releaseType == 'Dev'
+   uses: satvik-eltropy/github-actions-test/.github/workflows/build&deploy.yml@main
+   with:
+      env_name: Dev
+   secrets:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        API_TOKEN_GITHUB: ${{ secrets.API_TOKEN_GITHUB }}
+        
+
+    
+  
